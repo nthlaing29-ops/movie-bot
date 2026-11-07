@@ -1,4 +1,3 @@
-pip install python-telegram-bot requests netifaces
-
-pyTelegramBotAPI
-yt-dlp
+python-telegram-bot
+requests
+netifaces
